@@ -1,6 +1,6 @@
 <div align="center">
 
-# Assignment 2 : Flask and MongoDB
+# Assignment 3 : Flask and MongoDB
 
 </div>
 
