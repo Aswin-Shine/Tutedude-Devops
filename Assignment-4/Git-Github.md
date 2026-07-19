@@ -42,6 +42,12 @@ git push origin main
 
 ![Screenshot 1](./Screenshots/Screenshot-1.png)
 
+![Screenshot 1.1](./Screenshots/Screenshot-1.1.png)
+
+![Screenshot 1.2](./Screenshots/Screenshot-1.2.png)
+
+![Screenshot 1.3](./Screenshots/Screenshot-1.3.png)
+
 ---
 
 **Task 2 : Feature Branching and Conflict Resolution**
@@ -90,7 +96,6 @@ git add data.json
 git commit -m "Fix merge conflict by accepting aswinshine_new branch mutations"
 git push origin main
 ```
-
 **Explanation**
 - How Git Tracks Changes: Git does not store files as standard diff patches; it tracks content snapshots using a Directed Acyclic Graph (DAG). When you modify data.json on the main branch, and a peer modifies the exact same lines of data.json on the aswinshine_new branch, both branches diverge from a shared ancestral commit.
 
@@ -182,17 +187,16 @@ git merge master_1 --no-edit
 git merge master_2 --no-edit
 git push origin main
 ```
-
 **Explanation**
 - Parallel Workstreams: In an enterprise environment, separating frontend interface logic (master_1) from database engine operations (master_2) prevents overlapping changes. A frontend engineer can write HTML structure without needing a functioning database configuration present in their environment, and vice versa.
 
 - Non-Fast-Forward Merges (--no-edit): When you merge these branches back into the main timeline, if the main branch hasn't drifted, Git will try to perform a "Fast-Forward" merge (simply shifting the branch pointer forward without creating a new commit). Using structural checks or standard parallel merges forces Git to generate an explicit merge commit node. This acts as a permanent historical marker showing exactly when that entire feature block was integrated into production.
 
-![Screenshot 2](./Screenshots/Screenshot-2.png)
+![Screenshot 3](./Screenshots/Screenshot-3.png)
 
-![Screenshot 2.1](./Screenshots/Screenshot-2.1.png)
+![Screenshot 3.1](./Screenshots/Screenshot-3.1.png)
 
-![Screenshot 2.2](./Screenshots/Screenshot-2.2.png)
+![Screenshot 3.2](./Screenshots/Screenshot-3.2.png)
 
 ---
 
@@ -250,8 +254,7 @@ git rebase main master_1
 
 - Non-Fast-Forward Merges (--no-edit): When you merge these branches back into the main timeline, if the main branch hasn't drifted, Git will try to perform a "Fast-Forward" merge (simply shifting the branch pointer forward without creating a new commit). Using structural checks or standard parallel merges forces Git to generate an explicit merge commit node. This acts as a permanent historical marker showing exactly when that entire feature block was integrated into production.
 
-![Screenshot 2](./Screenshots/Screenshot-2.png)
+![Screenshot 4](./Screenshots/Screenshot-4.png)
 
-![Screenshot 2.1](./Screenshots/Screenshot-2.1.png)
+![Screenshot 4.1](./Screenshots/Screenshot-4.1.png)
 
-![Screenshot 2.2](./Screenshots/Screenshot-2.2.png)
