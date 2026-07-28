@@ -192,3 +192,12 @@ Step 3 : Define ECS Task Structures & Service Orchestration
 
 ![Screenshot 3.2](./Screenshots/Screenshot-3.5.png)
 ---
+
+
+<div align="center">
+
+# LIVE LINK
+
+http://tutedude-assignment6-alb-588105324.eu-north-1.elb.amazonaws.com
+
+</div>
