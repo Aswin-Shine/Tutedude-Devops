@@ -187,9 +187,14 @@ spec:
     - nodePort: 30080: (If using NodePort) Maps external node traffic directly to port 3000 of the frontend pod.
 
 ![Screenshot 2](./Screenshots/Screenshot-2.png)
+
 ---
 
+<div align="center">
+
 ## How to Implement
+
+</div>
 
 Step 1 : Start minikube
 ```
