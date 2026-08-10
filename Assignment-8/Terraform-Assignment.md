@@ -899,7 +899,7 @@ variable "mongo_uri" {
   description = "MongoDB Atlas connection string for the Flask backend. Plain env var, matching the Part 1/2 call to leave the cluster credential as-is since it's temporary."
   type        = string
   sensitive   = true
-  default     = "mongodb+srv://ashwinsh91_db_user:NH56mlwbxJFyhORv@cluster0.9n2vi99.mongodb.net/tutedude?retryWrites=true&w=majority"
+  default     = "mongodb+srv://ashwinsh91_db_user:<PASSWORD>@cluster0.9n2vi99.mongodb.net/tutedude?retryWrites=true&w=majority"
 }
 
 variable "frontend_env_vars" {
