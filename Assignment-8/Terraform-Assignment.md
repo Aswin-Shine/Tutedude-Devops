@@ -802,38 +802,617 @@ terraform apply -auto-approve -var-file=terraform.tfvars
 
 ---
 
-<div align="center">
+**Task 3 : Deploy Flask and Express Using Docker and AWS Services**
 
-## How to Implement
-
-</div>
-
-Step 1 : Start minikube
+Directory Structure
 ```
-minikube start 
-minikube status
-```
-
-Step 2 : Deploy all manifest files
-```
-kubectl apply -f ./k8s/backend-deployment.yaml
-kubectl apply -f ./k8s/backend-service.yaml
-kubectl apply -f ./k8s/frontend-deployment.yaml
-kubectl apply -f ./k8s/frontend-service.yaml
+terraform-ec2-part3/
+├── network.tf              ← VPC, 2 public subnets (2 AZs, ALB minimum), IGW, route table
+├── ecr.tf                  ← 2 ECR repos: flaskbackend, nodefrontend
+├── main.tf                 ← IAM exec role, security groups (ALB→frontend→backend by SG ref),
+│                              ECS cluster, Cloud Map namespace + backend service discovery,
+│                              ALB + target group + listener, both task definitions, both services
+├── provider.tf              ← region = var.aws_region (was missing before, real bug)
+├── variables.tf  outputs.tf  versions.tf  backend.tf
+├── terraform.tfvars  terraform.tfvars.example
+├── build-and-push.sh        ← clone repo, build both images, push to ECR, prints force-deploy commands
+├── console-steps.md          ← your original manual-build notes, kept for reference, marked stale at top
+└── README.md
 ```
 
-Step 4 : Check all pods are running 
-```
-kubectl get pods 
-kubectl get svc 
-```
-![Screenshot 3](./Screenshots/Screenshot-3.png)
+---
 
-Step 5 : Access the application 
+Terraform Files (root folder)
+
+1. Terraform Vars File (terraform.tfvars)
 ```
-minikube service frontend-service --url
+aws_region   = "eu-north-1"
+project_name = "tutedude-assignment6"
+image_tag                = "v1"
+
 ```
-![Screenshot 4](./Screenshots/Screenshot-4.png)
+
+**Explanation**
+- Target Deployment Region: Sets eu-north-1 (Stockholm) as the primary AWS region for all resource provisioning.
+
+- Project Naming Scope: Defines tutedude-assignment6 as the global resource naming and tagging prefix.
+
+- Container Release Versioning: Specifies v1 as the deployment tag for the application's container image.
+
+
+2. Terraform Variables File (variables.tf)
+```
+variable "aws_region" {
+  description = "AWS region to deploy into"
+  type        = string
+  default     = "eu-north-1"
+}
+
+variable "project_name" {
+  description = "Prefix used for naming all resources"
+  type        = string
+  default     = "tutedude-assignment6"
+}
+
+variable "vpc_cidr" {
+  description = "CIDR block for the VPC created for this part"
+  type        = string
+  default     = "10.1.0.0/16" # different range from Part 2's 10.0.0.0/16 -- these are separate VPCs, no risk of overlap mattering, but keeping them visually distinct avoids confusion when reading tfvars side by side
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for the public subnets -- needs at least 2, in different AZs, for the ALB"
+  type        = list(string)
+  default     = ["10.1.1.0/24", "10.1.2.0/24"]
+
+  validation {
+    condition     = length(var.public_subnet_cidrs) >= 2
+    error_message = "Provide at least 2 subnet CIDRs in different AZs for the ALB."
+  }
+}
+
+variable "image_tag" {
+  description = "Tag used for both ECR images. build-and-push.sh pushes this same tag."
+  type        = string
+  default     = "latest"
+}
+
+variable "backend_container_port" {
+  description = "Port the Flask container listens on inside the container"
+  type        = number
+  default     = 5001
+}
+
+variable "frontend_container_port" {
+  description = "Port the Express/Node container listens on inside the container"
+  type        = number
+  default     = 3000
+}
+
+variable "backend_env_vars" {
+  description = "Non-secret extra environment variables for the backend container"
+  type        = map(string)
+  default     = {}
+}
+
+variable "mongo_uri" {
+  description = "MongoDB Atlas connection string for the Flask backend. Plain env var, matching the Part 1/2 call to leave the cluster credential as-is since it's temporary."
+  type        = string
+  sensitive   = true
+  default     = "mongodb+srv://ashwinsh91_db_user:NH56mlwbxJFyhORv@cluster0.9n2vi99.mongodb.net/tutedude?retryWrites=true&w=majority"
+}
+
+variable "frontend_env_vars" {
+  description = "Extra environment variables for the frontend container. BACKEND_URL is added automatically."
+  type        = map(string)
+  default     = {}
+}
+
+variable "task_cpu" {
+  description = "Fargate task CPU units (256 = .25 vCPU, cheapest valid Fargate value)"
+  type        = number
+  default     = 256
+}
+
+variable "task_memory" {
+  description = "Fargate task memory in MB (must pair validly with task_cpu)"
+  type        = number
+  default     = 512
+}
+
+
+```
+
+**Explanation**
+- Deployment & Compute Sizing: Establishes regional deployment settings (eu-north-1) and defines minimum ECS Fargate task compute specs (0.25 vCPU / 512MB RAM).
+
+- Multi-AZ Network Validation: Configures a dedicated VPC (10.1.0.0/16) and enforces a validation rule requiring at least two public subnets across distinct AZs for Load Balancer compatibility.
+
+- Container Service Configurations: Defines shared image tagging (image_tag) alongside container port declarations for Express (3000) and Flask (5001).
+
+- Runtime Settings & Database Credentials: Handles container environment variables and securely captures a sensitive MongoDB Atlas connection string (mongo_uri).
+
+
+3. Network Terraform File (network.tf)
+```
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "${var.project_name}-vpc"
+  }
+}
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.project_name}-igw"
+  }
+}
+
+# ALB requires subnets in at least 2 AZs — this is a hard AWS requirement,
+# not a best-practice suggestion. Both subnets are public since Fargate
+# tasks here have no NAT gateway and need direct internet access to pull
+# from ECR and ship logs to CloudWatch.
+resource "aws_subnet" "public" {
+  count                   = length(var.public_subnet_cidrs)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  map_public_ip_on_launch = true
+
+  tags = {
+    Name = "${var.project_name}-public-subnet-${count.index + 1}"
+  }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-public-rt"
+  }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = length(aws_subnet.public)
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+
+```
+
+**Explanation**
+- VPC & Internet Gateway: Provisions a dedicated custom VPC with DNS hostnames enabled and attaches an Internet Gateway for public network connectivity.
+
+- Multi-AZ Public Subnetting: Dynamically creates public subnets across distinct Availability Zones using count to satisfy AWS Application Load Balancer requirements.
+
+- Direct Internet Access for Fargate: Configures auto-assign public IPs across subnets so serverless Fargate tasks can pull ECR images and send logs to CloudWatch without a NAT Gateway.
+
+- Centralized Public Routing: Establishes a public route table directing default 0.0.0.0/0 outbound traffic through the Internet Gateway and binds it to all provisioned subnets.
+
+
+4. ECR Terraform File (ecr.tf)
+```
+# force_delete lets `terraform destroy` remove these even with images still
+# in them — convenient for an assignment you'll tear down; wouldn't want
+# this on a repo you actually care about protecting from accidental deletion.
+resource "aws_ecr_repository" "backend" {
+  name                 = "flaskbackend"
+  image_tag_mutability = "MUTABLE" # required since build-and-push.sh always pushes ":latest"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Name = "${var.project_name}-flaskbackend-ecr"
+  }
+}
+
+resource "aws_ecr_repository" "frontend" {
+  name                 = "nodefrontend"
+  image_tag_mutability = "MUTABLE"
+  force_delete         = true
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+
+  tags = {
+    Name = "${var.project_name}-nodefrontend-ecr"
+  }
+}
+
+
+```
+
+**Explanation**
+- Container Registry Creation: Provisions two distinct AWS ECR repositories (flaskbackend and nodefrontend) to host the application's backend and frontend Docker images.
+
+- Mutable Tagging Support: Sets image_tag_mutability = "MUTABLE" to allow deployment scripts to repeatedly overwrite image tags like :latest.
+
+- Automated Vulnerability Scanning: Enables scan_on_push = true to automatically run security scans on container images upon upload.
+
+- Teardown Management: Sets force_delete = true so terraform destroy can purge both repositories completely without failing on existing images.
+
+
+5. Main Terraform File (main.tf)
+```
+# ---------------------------------------------------------------------------
+# IAM - execution role ECS needs to pull from private ECR + write logs
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "${var.project_name}-ecs-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# No Secrets Manager policy here -- Mongo URI goes in as a plain environment
+# variable below, matching the Part 1/2 call to leave the (temporary)
+# cluster credential as-is instead of adding Secrets Manager machinery.
+
+# ---------------------------------------------------------------------------
+# Security groups
+# ---------------------------------------------------------------------------
+
+resource "aws_security_group" "alb" {
+  name        = "${var.project_name}-alb-sg"
+  description = "Allow inbound HTTP from the internet to the ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTP from internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-alb-sg" }
+}
+
+resource "aws_security_group" "frontend" {
+  name        = "${var.project_name}-frontend-sg"
+  description = "Allow inbound only from the ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "From ALB only"
+    from_port       = var.frontend_container_port
+    to_port         = var.frontend_container_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-frontend-sg" }
+}
+
+resource "aws_security_group" "backend" {
+  name        = "${var.project_name}-backend-sg"
+  description = "Allow inbound only from the frontend service"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "From frontend service only"
+    from_port       = var.backend_container_port
+    to_port         = var.backend_container_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.frontend.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "${var.project_name}-backend-sg" }
+}
+
+# ---------------------------------------------------------------------------
+# ECS cluster
+# ---------------------------------------------------------------------------
+
+resource "aws_ecs_cluster" "this" {
+  name = "${var.project_name}-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Service discovery (Cloud Map) - lets frontend find backend by DNS name
+# instead of the ALB. No NAT/private subnet involved; this is DNS-level
+# routing only, not network isolation - the backend SG is what enforces that.
+# Backend intentionally never touches the ALB -- kept internal-only per
+# the explicit call to not add ALB path routing to it.
+# ---------------------------------------------------------------------------
+
+resource "aws_service_discovery_private_dns_namespace" "internal" {
+  name = "${var.project_name}.internal"
+  vpc  = aws_vpc.main.id
+}
+
+resource "aws_service_discovery_service" "backend" {
+  name = "backend" # matches the hostname your compose file already uses ("http://backend:5001/...")
+
+  dns_config {
+    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
+
+    dns_records {
+      ttl  = 10
+      type = "A"
+    }
+
+    routing_policy = "MULTIVALUE"
+  }
+
+  health_check_custom_config {
+    failure_threshold = 1
+  }
+}
+
+# ---------------------------------------------------------------------------
+# ALB (public-facing, frontend only)
+# ---------------------------------------------------------------------------
+
+resource "aws_lb" "frontend" {
+  name               = "${var.project_name}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = aws_subnet.public[*].id
+}
+
+resource "aws_lb_target_group" "frontend" {
+  name        = "${var.project_name}-frontend-tg"
+  port        = var.frontend_container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip" # required for Fargate awsvpc mode
+
+  health_check {
+    path                = "/"
+    healthy_threshold   = 2
+    unhealthy_threshold = 5
+    interval            = 30
+    timeout             = 5
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.frontend.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Task definitions
+# ---------------------------------------------------------------------------
+
+resource "aws_ecs_task_definition" "backend" {
+  family                   = "${var.project_name}-backend"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "flaskbackend"
+      image     = "${aws_ecr_repository.backend.repository_url}:${var.image_tag}"
+      essential = true
+      portMappings = [{
+        containerPort = var.backend_container_port
+        protocol      = "tcp"
+      }]
+      environment = [
+        for k, v in merge(
+          { MONGO_URI = var.mongo_uri },
+          var.backend_env_vars
+        ) : { name = k, value = v }
+      ]
+    }
+  ])
+}
+
+resource "aws_ecs_task_definition" "frontend" {
+  family                   = "${var.project_name}-frontend"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "nodefrontend"
+      image     = "${aws_ecr_repository.frontend.repository_url}:${var.image_tag}"
+      essential = true
+      portMappings = [{
+        containerPort = var.frontend_container_port
+        protocol      = "tcp"
+      }]
+      environment = [
+        for k, v in merge(
+          { BACKEND_URL = "http://backend.${var.project_name}.internal:${var.backend_container_port}/api/submit" },
+          var.frontend_env_vars
+        ) : { name = k, value = v }
+      ]
+    }
+  ])
+}
+
+# ---------------------------------------------------------------------------
+# ECS services
+# ---------------------------------------------------------------------------
+
+resource "aws_ecs_service" "backend" {
+  name            = "${var.project_name}-backend-svc"
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.backend.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.backend.id]
+    assign_public_ip = true # required: no NAT gateway, task needs a public IP to reach ECR/CloudWatch
+  }
+
+  service_registries {
+    registry_arn = aws_service_discovery_service.backend.arn
+  }
+}
+
+resource "aws_ecs_service" "frontend" {
+  name            = "${var.project_name}-frontend-svc"
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.frontend.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.frontend.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.frontend.arn
+    container_name   = "nodefrontend"
+    container_port   = var.frontend_container_port
+  }
+
+  depends_on = [aws_lb_listener.http]
+}
+
+```
+
+**Explanation**
+- Tiered Security Architecture: Enforces strict Security Group chaining (Internet → ALB → Frontend → Backend) and provisions an IAM execution role granting ECS tasks permission to pull ECR images and send logs.
+
+- Public Load Balancing: Deploys an internet-facing Application Load Balancer listening on HTTP port 80 to route public web traffic directly to the Frontend service target group.
+
+- Private Service Discovery: Configures an AWS Cloud Map private DNS namespace (backend.tutedude-assignment6.internal) allowing the Frontend to reach the Backend internally without exposing the API through the ALB.
+
+- Fargate Task Orchestration: Provisions ECS Fargate task definitions and services in awsvpc mode, assigning public IPs so containers can pull ECR images directly without needing an expensive NAT Gateway.
+
+
+6. Outputs Terraform File (outputs.tf)
+```
+output "alb_dns_name" {
+  description = "Public URL to hit your frontend"
+  value       = "http://${aws_lb.frontend.dns_name}"
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.this.name
+}
+
+output "backend_service_discovery_dns" {
+  description = "Internal DNS name the frontend uses to reach the backend"
+  value       = "backend.${var.project_name}.internal"
+}
+
+output "ecr_backend_repository_url" {
+  description = "Push the Flask image here -- build-and-push.sh reads this"
+  value       = aws_ecr_repository.backend.repository_url
+}
+
+output "ecr_frontend_repository_url" {
+  description = "Push the Express image here -- build-and-push.sh reads this"
+  value       = aws_ecr_repository.frontend.repository_url
+}
+
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+
+```
+
+**Explanation**
+- Public Frontend Access: Outputs the Application Load Balancer DNS name formatted as a usable HTTP endpoint (http://${aws_lb.frontend.dns_name}) for public web browsing.
+
+- ECR Registry Targets: Exposes repository URLs for both flaskbackend and nodefrontend containers to integrate seamlessly with automated build-and-push deployment scripts.
+
+- Internal Service Discovery: Displays the private Cloud Map DNS hostname (backend.${var.project_name}.internal) used for internal inter-container communication.
+
+- Core Infrastructure Metadata: Outputs the ECS cluster name and custom VPC ID for downstream automation, inspection, and AWS CLI operations.
+
+Commands to run :
+```
+terraform init
+terraform plan
+terraform apply -auto-approve -var-file=terraform.tfvars
+
+# ECR Image push commands
+docker tag aswinshine/flask-backend:v1 <AWS_ACCOUNT_NO>.dkr.ecr.eu-north-1.amazonaws.com/flaskbackend:v1
+docker tag aswinshine/node-frontend:v1 <AWS_ACCOUNT_NO>.dkr.ecr.eu-north-1.amazonaws.com/nodefrontend:v1
+
+docker push <AWS_ACCOUNT_NO>.dkr.ecr.eu-north-1.amazonaws.com/flaskbackend:v1
+docker push <AWS_ACCOUNT_NO>.dkr.ecr.eu-north-1.amazonaws.com/nodefrontend:v1
+```
+![Screenshot 3](./Screenshots/Part3-3.png)
+
+![Screenshot 3.1](./Screenshots/Part3-3.1.png)
+
+![Screenshot 3.2](./Screenshots/Part3-3.2.png)
+
 ---
 
 <div align="center">
@@ -855,5 +1434,13 @@ minikube service frontend-service --url
 ![Screenshot 2.2](./Screenshots/Part2-2.2.png)
 
 ![Screenshot 2.3](./Screenshots/Part2-2.3.png)
+
+---
+
+### Part 3 
+
+![Screenshot 3.3](./Screenshots/Part3-3.3.png)
+
+![Screenshot 3.4](./Screenshots/Part3-3.4.png)
 
 ---
