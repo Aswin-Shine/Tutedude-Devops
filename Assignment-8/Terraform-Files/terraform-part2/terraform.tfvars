@@ -1,0 +1,11 @@
+aws_region          = "eu-north-1"
+environment         = "assignment"
+project_name        = "tutedude"
+instance_type       = "t3.micro"
+key_name            = "flask-double-ec2"  # must already exist in eu-north-1
+allowed_ssh_cidr    = "0.0.0.0/0"             # e.g. curl ifconfig.me, then /32
+github_repo_url     = "https://github.com/Aswin-Shine/tutedude-flask-app.git"
+backend_port        = 5001                     # kept at repo default per Part 2 spec
+frontend_port       = 3000
+vpc_cidr            = "10.10.0.0/16"
+public_subnet_cidr  = "10.10.1.0/24"

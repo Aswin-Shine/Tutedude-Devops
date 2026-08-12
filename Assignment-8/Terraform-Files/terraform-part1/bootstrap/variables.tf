@@ -1,0 +1,17 @@
+variable "aws_region" {
+  description = "AWS region for the state backend resources"
+  type        = string
+  default     = "eu-north-1"
+}
+
+variable "state_bucket_name" {
+  description = "Globally-unique S3 bucket name for Terraform state. Must be changed from default — S3 bucket names are global."
+  type        = string
+  default     = "tutedude-tfstate-aswin-shine"
+}
+
+variable "lock_table_name" {
+  description = "DynamoDB table name for Terraform state locking"
+  type        = string
+  default     = "tutedude-tfstate-lock"
+}

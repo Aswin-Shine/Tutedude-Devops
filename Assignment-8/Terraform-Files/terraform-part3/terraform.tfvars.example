@@ -1,0 +1,13 @@
+# Every variable has a default now (VPC + ECR are created by this config,
+# not referenced), so an empty tfvars file would technically work. Kept
+# here for the values you're most likely to actually want to change.
+
+aws_region   = "eu-north-1"
+project_name = "tutedude-assignment6"
+
+# backend_container_port  = 5001
+# frontend_container_port = 3000
+# image_tag                = "latest"
+
+# Override only if you rotate the Atlas password:
+# mongo_uri = "mongodb+srv://..."
