@@ -356,7 +356,7 @@ terraform apply -auto-approve -var-file=terraform.tfvars
 ```
 ![Terraform 1](./Screenshots/Terraform-1.png)
 
-![Terraform 1.1](./Screenshots/Terraform-1.1.pngs)
+![Terraform 1.1](./Screenshots/Terraform-1.1.png)
 
 ---
 
